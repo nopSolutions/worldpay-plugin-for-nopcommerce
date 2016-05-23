@@ -151,9 +151,9 @@ namespace Nop.Plugin.Payments.WorldPay.Controllers
             });
             _orderService.UpdateOrder(order);
 
-            /*if (transStatus.ToLower() != "y")
-                return  Content(string.Format("The transaction status received from WorldPay ({0}) for the order {1} was declined.", transStatus, orderId));
-            */
+            if (transStatus.ToLower() != "y")
+                    return "<html><head><meta http-equiv=\"refresh\" content=\"0; url=" + _webHelper.GetStoreLocation(false) + "/checkout\"><title>Some title here</title></head><body><h2><WPDISPLAY ITEM=banner></h2><br /><h2>Object moved to <a href=\"" + _webHelper.GetStoreLocation(false) + "/checkout/completed/" + order.Id + "\">here</a>.</h2></body></html>";
+
 
             if (_orderProcessingService.CanMarkOrderAsPaid(order))
             {
