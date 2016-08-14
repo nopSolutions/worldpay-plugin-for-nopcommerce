@@ -94,75 +94,86 @@ namespace Nop.Plugin.Payments.WorldPay.Controllers
             return paymentInfo;
         }
 
-        [ValidateInput(false)]
-        public string Return(FormCollection form)
-        {
-            var processor = _paymentService.LoadPaymentMethodBySystemName("Payments.WorldPay") as WorldPayPaymentProcessor;
-            if (processor == null || !processor.IsPaymentMethodActive(_paymentSettings) || !processor.PluginDescriptor.Installed)
-                throw new NopException("WorldPay module cannot be loaded");
+		[ValidateInput(false)]
+		public string Return(FormCollection form)
+		{
+			var processor = _paymentService.LoadPaymentMethodBySystemName("Payments.WorldPay") as WorldPayPaymentProcessor;
+			if (processor == null || !processor.IsPaymentMethodActive(_paymentSettings) || !processor.PluginDescriptor.Installed)
+				throw new NopException("WorldPay module cannot be loaded");
 
-            string transStatus = CommonHelper.EnsureNotNull(form["transStatus"]);
-            string returnedcallbackPw = CommonHelper.EnsureNotNull(form["callbackPW"]);
-            string orderId = CommonHelper.EnsureNotNull(form["cartId"]);
-            string returnedInstanceId = CommonHelper.EnsureNotNull(form["instId"]);
-            string callbackPassword = _worldPayPaymentSettings.CallbackPassword;
-            string transId = CommonHelper.EnsureNotNull(form["transId"]);
-            string transResult = _webHelper.QueryString<string>("msg");
-            string instanceId = _worldPayPaymentSettings.InstanceId;
+			// Result parameters: http://support.worldpay.com/support/kb/bg/htmlredirect/rhtml5904.html
+			string transStatus = CommonHelper.EnsureNotNull(form["transStatus"]);
+			string returnedcallbackPw = CommonHelper.EnsureNotNull(form["callbackPW"]);
+			string orderId = CommonHelper.EnsureNotNull(form["cartId"]);
+			string returnedInstanceId = CommonHelper.EnsureNotNull(form["instId"]);
+			string callbackPassword = _worldPayPaymentSettings.CallbackPassword;
+			string transId = CommonHelper.EnsureNotNull(form["transId"]);
+			string transResult = _webHelper.QueryString<string>("msg");
+			string instanceId = _worldPayPaymentSettings.InstanceId;
 
-            var order = _orderService.GetOrderById(Convert.ToInt32(orderId));
-            if (order == null)
-                throw new NopException(string.Format("The order ID {0} doesn't exists", orderId));
+			var order = _orderService.GetOrderById(Convert.ToInt32(orderId));
+			if (order == null)
+				throw new NopException(string.Format("The order ID {0} doesn't exists", orderId));
 
-            if (string.IsNullOrEmpty(instanceId))
-                throw new NopException("Worldpay Instance ID is not set");
+			if (string.IsNullOrEmpty(instanceId))
+				throw new NopException("Worldpay Instance ID is not set");
 
-            if (string.IsNullOrEmpty(returnedInstanceId))
-                throw new NopException("Returned Worldpay Instance ID is not set");
+			if (string.IsNullOrEmpty(returnedInstanceId))
+				throw new NopException("Returned Worldpay Instance ID is not set");
 
-            if (instanceId.Trim() != returnedInstanceId.Trim())
-                throw new NopException(string.Format("The Instance ID ({0}) received for order {1} does not match the WorldPay Instance ID stored in the database ({2})", returnedInstanceId, orderId, instanceId));
+			if (instanceId.Trim() != returnedInstanceId.Trim())
+				throw new NopException(string.Format("The Instance ID ({0}) received for order {1} does not match the WorldPay Instance ID stored in the database ({2})", returnedInstanceId, orderId, instanceId));
 
-            if (returnedcallbackPw.Trim() != callbackPassword.Trim())
-                throw new NopException(string.Format("The callback password ({0}) received within the Worldpay Callback for the order {1} does not match that stored in your database.", returnedcallbackPw, orderId));
+			if (returnedcallbackPw.Trim() != callbackPassword.Trim())
+				throw new NopException(string.Format("The callback password ({0}) received within the Worldpay Callback for the order {1} does not match that stored in your database.", returnedcallbackPw, orderId));
 
+			// Add order note:
+			string status = "n/a";
+			if (transStatus.ToUpper() == "Y")
+			{
+				status = "Successful";
+			}
+			else if (transStatus.ToUpper() == "C")
+			{
+				status = "Cancelled";
+			}
 
-            string status = "n/a";
-            if (transStatus.ToUpper() == "Y")
-            {
-                status = "Successful";
-            }
-            else if (transStatus.ToUpper() == "C")
-            {
-                status = "Cancelled";
-            }
+			StringBuilder sb = new StringBuilder();
+			sb.AppendLine("WorldPay details:");
+			sb.AppendLine("Order ID: " + orderId);
+			sb.AppendLine("WorldPay Transaction ID: " + transId);
+			sb.AppendLine(String.Format("Transaction Status: {0} ({1})", transStatus, status));
+			sb.AppendLine("Transaction Result: " + transResult);
+			order.OrderNotes.Add(new OrderNote()
+			{
+				Note = sb.ToString(),
+				DisplayToCustomer = false,
+				CreatedOnUtc = DateTime.UtcNow
+			});
+			_orderService.UpdateOrder(order);
 
-            var sb = new StringBuilder();
-            sb.AppendLine("WorldPay details:");
-            sb.AppendLine("OrderID: " + orderId);
-            sb.AppendLine("WorldPay Transaction ID: " + transId);
-            sb.AppendLine(String.Format("Transaction Status: {0} ({1})", transStatus, status));
-            sb.AppendLine("Transaction Result: " + transResult);
-            order.OrderNotes.Add(new OrderNote()
-            {
-                Note = sb.ToString(),
-                DisplayToCustomer = false,
-                CreatedOnUtc = DateTime.UtcNow
-            });
-            _orderService.UpdateOrder(order);
+			if (transStatus.ToUpper() != "Y")
+			{
+				// Payment cancelled or declined
+				string returnURL = _webHelper.GetStoreLocation(false).TrimEnd('/') + "/orderdetails/" + orderId;
 
-            /*if (transStatus.ToLower() != "y")
-                return  Content(string.Format("The transaction status received from WorldPay ({0}) for the order {1} was declined.", transStatus, orderId));
-            */
+				string html = "<html><head><title>Payment Cancelled</title></head>";
+				html += string.Format("<body>The transaction status received from WorldPay ({0}) for the order {1} was declined or cancelled. Your payment was <strong>not</strong> processed.", transStatus, orderId);
+				html += string.Format("<br /><br />You will need to <a href=\"{0}\">return to the site</a> and choose the 'Retry Payment' button (you may need to refresh this page)", returnURL);
+				html += "</body></html>";
+				return html;
+			}
+			else
+			{
+				// Payment successful 
+				if (_orderProcessingService.CanMarkOrderAsPaid(order))
+				{
+					_orderProcessingService.MarkOrderAsPaid(order);
+				}
 
-            if (_orderProcessingService.CanMarkOrderAsPaid(order))
-            {
-                _orderProcessingService.MarkOrderAsPaid(order);
-            }
-
-            //return RedirectToRoute("CheckoutCompleted", new { orderId = order.Id });
-            string html = "<html><head><meta http-equiv=\"refresh\" content=\"0; url=" + _webHelper.GetStoreLocation(false) + "/checkout/completed/" + order.Id + "\"><title>Some title here</title></head><body><h2><WPDISPLAY ITEM=banner></h2><br /><h2>Object moved to <a href=\"" + _webHelper.GetStoreLocation(false) + "/checkout/completed/" + order.Id + "\">here</a>.</h2></body></html>";
-            return html;
-        }
+				string html = "<html><head><meta http-equiv=\"refresh\" content=\"0; url=" + _webHelper.GetStoreLocation(false).TrimEnd('/') + "/checkout/completed/" + order.Id + "\"><title>Redirecting...</title></head><body><h2><WPDISPLAY ITEM=banner></h2><br /><h2>If you are not automatically redirected, then please click <a href=\"" + _webHelper.GetStoreLocation(false) + "/checkout/completed/" + order.Id + "\">here</a>.</h2></body></html>";
+				return html;
+			}
+		}
     }
 }

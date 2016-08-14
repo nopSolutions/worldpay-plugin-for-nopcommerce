@@ -1,8 +1,8 @@
 ﻿Group: Payment methods
-FriendlyName: WorldPay
+FriendlyName: Credit/Debit card via WorldPay
 SystemName: Payments.WorldPay
-Version: 1.03
-SupportedVersions: 3.70
+Version: 1.04
+SupportedVersions: 3.80
 Author: nopCommerce team
 DisplayOrder: 1
 FileName: Nop.Plugin.Payments.WorldPay.dll
