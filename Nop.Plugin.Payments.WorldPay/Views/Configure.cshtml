@@ -1,0 +1,111 @@
+﻿@{
+    Layout = "";
+}
+@model ConfigurationModel
+@using Nop.Plugin.Payments.WorldPay.Models;
+@using Nop.Web.Framework;
+
+@using (Html.BeginForm())
+{
+    @Html.AntiForgeryToken()
+    <div class="panel-group">
+        <div class="panel panel-default">
+            <div class="panel-body">
+                <p>
+                    After downloading the plugin you should send the source code to Worldpay to pass the plugin code certification using this link:
+                    <a href="https://www.worldpay.com/us/forms/get-certified">https://www.worldpay.com/us/forms/get-certified</a>
+                    . After the certification you will get unique DeveloperId and DeveloperVersion.
+                    You cannot go live with the application until Worldpay technical team has certified your app and you receive the confirmation letter with the keys. This process is needed to ensure that you are using the APIs correctly and obtaining valid results.
+                </p>
+                <div class="form-group">
+                    <div class="col-md-3">
+                        @Html.NopLabelFor(model => model.SecureNetID)
+                    </div>
+                    <div class="col-md-9">
+                        @Html.NopEditorFor(model => model.SecureNetID)
+                        @Html.ValidationMessageFor(model => model.SecureNetID)
+                    </div>
+                </div>
+                <div class="form-group">
+                    <div class="col-md-3">
+                        @Html.NopLabelFor(model => model.SecureKey)
+                    </div>
+                    <div class="col-md-9">
+                        @Html.NopEditorFor(model => model.SecureKey)
+                        @Html.ValidationMessageFor(model => model.SecureKey)
+                    </div>
+                </div>
+                <div class="form-group">
+                    <div class="col-md-3">
+                        @Html.NopLabelFor(model => model.UseSandbox)
+                    </div>
+                    <div class="col-md-9">
+                        @Html.NopEditorFor(model => model.UseSandbox)
+                        @Html.ValidationMessageFor(model => model.UseSandbox)
+                    </div>
+                </div>
+                <div class="form-group">
+                    <div class="col-md-3">
+                        @Html.NopLabelFor(model => model.EndPoint)
+                    </div>
+                    <div class="col-md-9">
+                        @Html.NopEditorFor(model => model.EndPoint)
+                        @Html.ValidationMessageFor(model => model.EndPoint)
+                    </div>
+                </div>
+                <div class="form-group">
+                    <div class="col-md-3">
+                        @Html.NopLabelFor(model => model.TransactModeId)
+                    </div>
+                    <div class="col-md-9">
+                        @Html.NopDropDownListFor(model => model.TransactModeId, Model.TransactModes)
+                        @Html.ValidationMessageFor(model => model.TransactModeId)
+                    </div>
+                </div>
+                <div class="form-group">
+                    <div class="col-md-3">
+                        @Html.NopLabelFor(model => model.AdditionalFee)
+                    </div>
+                    <div class="col-md-9">
+                        @Html.NopEditorFor(model => model.AdditionalFee)
+                        @Html.ValidationMessageFor(model => model.AdditionalFee)
+                    </div>
+                </div>
+                <div class="form-group">
+                    <div class="col-md-3">
+                        @Html.NopLabelFor(model => model.AdditionalFeePercentage)
+                    </div>
+                    <div class="col-md-9">
+                        @Html.NopEditorFor(model => model.AdditionalFeePercentage)
+                        @Html.ValidationMessageFor(model => model.AdditionalFeePercentage)
+                    </div>
+                </div>
+                <div class="form-group">
+                    <div class="col-md-3">
+                        @Html.NopLabelFor(model => model.DeveloperId)
+                    </div>
+                    <div class="col-md-9">
+                        @Html.NopEditorFor(model => model.DeveloperId)
+                        @Html.ValidationMessageFor(model => model.DeveloperId)
+                    </div>
+                </div>
+                <div class="form-group">
+                    <div class="col-md-3">
+                        @Html.NopLabelFor(model => model.DeveloperVersion)
+                    </div>
+                    <div class="col-md-9">
+                        @Html.NopEditorFor(model => model.DeveloperVersion)
+                        @Html.ValidationMessageFor(model => model.DeveloperVersion)
+                    </div>
+                </div>
+                <div class="form-group">
+                    <div class="col-md-9 col-md-offset-3">
+                        <button type="submit" class="btn btn-primary">
+                            @T("Admin.Common.Save")
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+}

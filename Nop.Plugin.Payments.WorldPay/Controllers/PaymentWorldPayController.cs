@@ -1,13 +1,12 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Text;
+using System.Linq;
 using System.Web.Mvc;
-using Nop.Core;
-using Nop.Core.Domain.Orders;
-using Nop.Core.Domain.Payments;
 using Nop.Plugin.Payments.WorldPay.Models;
+using Nop.Plugin.Payments.WorldPay.Validators;
+using Nop.Services;
 using Nop.Services.Configuration;
-using Nop.Services.Orders;
+using Nop.Services.Localization;
 using Nop.Services.Payments;
 using Nop.Web.Framework.Controllers;
 
@@ -16,41 +15,37 @@ namespace Nop.Plugin.Payments.WorldPay.Controllers
     public class PaymentWorldPayController : BasePaymentController
     {
         private readonly ISettingService _settingService;
-        private readonly IPaymentService _paymentService;
-        private readonly IOrderService _orderService;
-        private readonly IOrderProcessingService _orderProcessingService;
-        private readonly IWebHelper _webHelper;
         private readonly WorldPayPaymentSettings _worldPayPaymentSettings;
-        private readonly PaymentSettings _paymentSettings;
+        private readonly ILocalizationService _localizationService;
 
         public PaymentWorldPayController(ISettingService settingService, 
-            IPaymentService paymentService, IOrderService orderService, 
-            IOrderProcessingService orderProcessingService, IWebHelper webHelper,
             WorldPayPaymentSettings worldPayPaymentSettings,
-            PaymentSettings paymentSettings)
+            ILocalizationService localizationService)
         {
             this._settingService = settingService;
-            this._paymentService = paymentService;
-            this._orderService = orderService;
-            this._orderProcessingService = orderProcessingService;
-            this._webHelper = webHelper;
             this._worldPayPaymentSettings = worldPayPaymentSettings;
-            this._paymentSettings = paymentSettings;
+            this._localizationService = localizationService;
         }
         
         [AdminAuthorize]
         [ChildActionOnly]
         public ActionResult Configure()
         {
-            var model = new ConfigurationModel();
-            model.UseSandbox = _worldPayPaymentSettings.UseSandbox;
-            model.InstanceId = _worldPayPaymentSettings.InstanceId;
-            model.CreditCard = _worldPayPaymentSettings.CreditCard;
-            model.CallbackPassword = _worldPayPaymentSettings.CallbackPassword;
-            model.CssName = _worldPayPaymentSettings.CssName;
-            model.AdditionalFee = _worldPayPaymentSettings.AdditionalFee;
+            var model = new ConfigurationModel
+            {
+                SecureNetID = _worldPayPaymentSettings.SecureNetID,
+                SecureKey = _worldPayPaymentSettings.SecureKey,
+                UseSandbox = _worldPayPaymentSettings.UseSandbox,
+                TransactModeId = (int) _worldPayPaymentSettings.TransactMode,
+                TransactModes = _worldPayPaymentSettings.TransactMode.ToSelectList(),
+                AdditionalFee = _worldPayPaymentSettings.AdditionalFee,
+                AdditionalFeePercentage = _worldPayPaymentSettings.AdditionalFeePercentage,
+                EndPoint = _worldPayPaymentSettings.EndPoint,
+                DeveloperId = _worldPayPaymentSettings.DeveloperId,
+                DeveloperVersion = _worldPayPaymentSettings.DeveloperVersion
+            };
 
-            return View("~/Plugins/Payments.WorldPay/Views/PaymentWorldPay/Configure.cshtml", model);
+            return View("~/Plugins/Payments.WorldPay/Views/Configure.cshtml", model);
         }
 
         [HttpPost]
@@ -62,107 +57,108 @@ namespace Nop.Plugin.Payments.WorldPay.Controllers
                 return Configure();
 
             //save settings
+            _worldPayPaymentSettings.SecureNetID = model.SecureNetID;
+            _worldPayPaymentSettings.SecureKey = model.SecureKey;
             _worldPayPaymentSettings.UseSandbox = model.UseSandbox;
-            _worldPayPaymentSettings.InstanceId = model.InstanceId;
-            _worldPayPaymentSettings.CreditCard = model.CreditCard;
-            _worldPayPaymentSettings.CallbackPassword = model.CallbackPassword;
-            _worldPayPaymentSettings.CssName = model.CssName;
+            _worldPayPaymentSettings.TransactMode = (TransactMode)model.TransactModeId;
             _worldPayPaymentSettings.AdditionalFee = model.AdditionalFee;
+            _worldPayPaymentSettings.AdditionalFeePercentage = model.AdditionalFeePercentage;
+            _worldPayPaymentSettings.EndPoint = model.EndPoint;
+            _worldPayPaymentSettings.DeveloperId = model.DeveloperId;
+            _worldPayPaymentSettings.DeveloperVersion = model.DeveloperVersion;
+
             _settingService.SaveSetting(_worldPayPaymentSettings);
 
-            return View("~/Plugins/Payments.WorldPay/Views/PaymentWorldPay/Configure.cshtml", model);
+            //clear settings cache
+            _settingService.ClearCache();
+
+            SuccessNotification(_localizationService.GetResource("Admin.Plugins.Saved"));
+
+            return Configure();
         }
 
         [ChildActionOnly]
         public ActionResult PaymentInfo()
         {
             var model = new PaymentInfoModel();
-            return View("~/Plugins/Payments.WorldPay/Views/PaymentWorldPay/PaymentInfo.cshtml", model);
+
+            //years
+            for (var i = 0; i < 15; i++)
+            {
+                var year = Convert.ToString(DateTime.Now.Year + i);
+                model.ExpireYears.Add(new SelectListItem
+                {
+                    Text = year,
+                    Value = year
+                });
+            }
+
+            //months
+            for (var i = 1; i <= 12; i++)
+            {
+                var text = i < 10 ? "0" + i : i.ToString();
+                model.ExpireMonths.Add(new SelectListItem
+                {
+                    Text = text,
+                    Value = i.ToString(),
+                });
+            }
+
+            //set postback values
+            var form = this.Request.Form;
+            model.CardholderName = form["CardholderName"];
+            model.CardNumber = form["CardNumber"];
+            model.CardCode = form["CardCode"];
+            var selectedMonth = model.ExpireMonths.FirstOrDefault(x => x.Value.Equals(form["ExpireMonth"], StringComparison.InvariantCultureIgnoreCase));
+
+            if (selectedMonth != null)
+                selectedMonth.Selected = true;
+
+            var selectedYear = model.ExpireYears.FirstOrDefault(x => x.Value.Equals(form["ExpireYear"], StringComparison.InvariantCultureIgnoreCase));
+
+            if (selectedYear != null)
+                selectedYear.Selected = true;
+
+            return View("~/Plugins/Payments.WorldPay/Views/PaymentInfo.cshtml", model);
         }
 
         [NonAction]
         public override IList<string> ValidatePaymentForm(FormCollection form)
         {
             var warnings = new List<string>();
+
+            //validate
+            var validator = new PaymentInfoValidator(_localizationService);
+            var model = new PaymentInfoModel
+            {
+                CardholderName = form["CardholderName"],
+                CardNumber = form["CardNumber"],
+                CardCode = form["CardCode"],
+                ExpireMonth = form["ExpireMonth"],
+                ExpireYear = form["ExpireYear"]
+            };
+
+            var validationResult = validator.Validate(model);
+
+            if (!validationResult.IsValid)
+                warnings.AddRange(validationResult.Errors.Select(error => error.ErrorMessage));
+
             return warnings;
         }
 
         [NonAction]
         public override ProcessPaymentRequest GetPaymentInfo(FormCollection form)
         {
-            var paymentInfo = new ProcessPaymentRequest();
+            var paymentInfo = new ProcessPaymentRequest
+            {
+                CreditCardName = form["CardholderName"],
+                CreditCardNumber = form["CardNumber"],
+                CreditCardExpireMonth = int.Parse(form["ExpireMonth"]),
+                CreditCardExpireYear = int.Parse(form["ExpireYear"]),
+                CreditCardCvv2 = form["CardCode"]
+            };
+
             return paymentInfo;
-        }
-
-        [ValidateInput(false)]
-        public string Return(FormCollection form)
-        {
-            var processor = _paymentService.LoadPaymentMethodBySystemName("Payments.WorldPay") as WorldPayPaymentProcessor;
-            if (processor == null || !processor.IsPaymentMethodActive(_paymentSettings) || !processor.PluginDescriptor.Installed)
-                throw new NopException("WorldPay module cannot be loaded");
-
-            string transStatus = CommonHelper.EnsureNotNull(form["transStatus"]);
-            string returnedcallbackPw = CommonHelper.EnsureNotNull(form["callbackPW"]);
-            string orderId = CommonHelper.EnsureNotNull(form["cartId"]);
-            string returnedInstanceId = CommonHelper.EnsureNotNull(form["instId"]);
-            string callbackPassword = _worldPayPaymentSettings.CallbackPassword;
-            string transId = CommonHelper.EnsureNotNull(form["transId"]);
-            string transResult = _webHelper.QueryString<string>("msg");
-            string instanceId = _worldPayPaymentSettings.InstanceId;
-
-            var order = _orderService.GetOrderById(Convert.ToInt32(orderId));
-            if (order == null)
-                throw new NopException(string.Format("The order ID {0} doesn't exists", orderId));
-
-            if (string.IsNullOrEmpty(instanceId))
-                throw new NopException("Worldpay Instance ID is not set");
-
-            if (string.IsNullOrEmpty(returnedInstanceId))
-                throw new NopException("Returned Worldpay Instance ID is not set");
-
-            if (instanceId.Trim() != returnedInstanceId.Trim())
-                throw new NopException(string.Format("The Instance ID ({0}) received for order {1} does not match the WorldPay Instance ID stored in the database ({2})", returnedInstanceId, orderId, instanceId));
-
-            if (returnedcallbackPw.Trim() != callbackPassword.Trim())
-                throw new NopException(string.Format("The callback password ({0}) received within the Worldpay Callback for the order {1} does not match that stored in your database.", returnedcallbackPw, orderId));
-
-
-            string status = "n/a";
-            if (transStatus.ToUpper() == "Y")
-            {
-                status = "Successful";
-            }
-            else if (transStatus.ToUpper() == "C")
-            {
-                status = "Cancelled";
-            }
-
-            var sb = new StringBuilder();
-            sb.AppendLine("WorldPay details:");
-            sb.AppendLine("OrderID: " + orderId);
-            sb.AppendLine("WorldPay Transaction ID: " + transId);
-            sb.AppendLine(String.Format("Transaction Status: {0} ({1})", transStatus, status));
-            sb.AppendLine("Transaction Result: " + transResult);
-            order.OrderNotes.Add(new OrderNote()
-            {
-                Note = sb.ToString(),
-                DisplayToCustomer = false,
-                CreatedOnUtc = DateTime.UtcNow
-            });
-            _orderService.UpdateOrder(order);
-
-            /*if (transStatus.ToLower() != "y")
-                return  Content(string.Format("The transaction status received from WorldPay ({0}) for the order {1} was declined.", transStatus, orderId));
-            */
-
-            if (_orderProcessingService.CanMarkOrderAsPaid(order))
-            {
-                _orderProcessingService.MarkOrderAsPaid(order);
-            }
-
-            //return RedirectToRoute("CheckoutCompleted", new { orderId = order.Id });
-            string html = "<html><head><meta http-equiv=\"refresh\" content=\"0; url=" + _webHelper.GetStoreLocation(false) + "/checkout/completed/" + order.Id + "\"><title>Some title here</title></head><body><h2><WPDISPLAY ITEM=banner></h2><br /><h2>Object moved to <a href=\"" + _webHelper.GetStoreLocation(false) + "/checkout/completed/" + order.Id + "\">here</a>.</h2></body></html>";
-            return html;
         }
     }
 }

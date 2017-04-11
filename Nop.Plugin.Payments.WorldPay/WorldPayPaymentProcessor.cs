@@ -1,20 +1,20 @@
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.Web.Routing;
 using Nop.Core;
-using Nop.Core.Domain;
-using Nop.Core.Domain.Directory;
 using Nop.Core.Domain.Orders;
 using Nop.Core.Domain.Payments;
-using Nop.Core.Domain.Shipping;
 using Nop.Core.Plugins;
 using Nop.Plugin.Payments.WorldPay.Controllers;
+using Nop.Plugin.Payments.WorldPay.Domain;
+using Nop.Plugin.Payments.WorldPay.Helpers;
 using Nop.Services.Configuration;
+using Nop.Services.Customers;
 using Nop.Services.Directory;
 using Nop.Services.Localization;
+using Nop.Services.Logging;
+using Nop.Services.Orders;
 using Nop.Services.Payments;
-using Nop.Web.Framework;
 
 namespace Nop.Plugin.Payments.WorldPay
 {
@@ -26,48 +26,36 @@ namespace Nop.Plugin.Payments.WorldPay
         #region Fields
 
         private readonly WorldPayPaymentSettings _worldPayPaymentSettings;
-        private readonly IStoreContext _storeContext;
         private readonly ICurrencyService _currencyService;
-        private readonly CurrencySettings _currencySettings;
         private readonly ISettingService _settingService;
-        private readonly IWebHelper _webHelper;
-        private readonly IWorkContext _workContext;
+        private readonly ICustomerService _customerService;
+        private readonly ILogger _logger;
+        private readonly IOrderTotalCalculationService _orderTotalCalculationService;
+        private readonly ILocalizationService _localizationService;
 
         #endregion
 
         #region Ctor
 
         public WorldPayPaymentProcessor(WorldPayPaymentSettings worldPayPaymentSettings,
-            IStoreContext storeContext, ICurrencyService currencyService,
-            CurrencySettings currencySettings,
-            ISettingService settingService, IWebHelper webHelper, IWorkContext workContext)
+            ICurrencyService currencyService,
+            ISettingService settingService,
+            ICustomerService customerService,
+            ILogger logger,
+            IOrderTotalCalculationService orderTotalCalculationService,
+            ILocalizationService localizationService)
         {
             this._worldPayPaymentSettings = worldPayPaymentSettings;
-            this._storeContext = storeContext;
             this._currencyService = currencyService;
-            this._currencySettings = currencySettings;
             this._settingService = settingService;
-            this._webHelper = webHelper;
-            this._workContext = workContext;
+            this._customerService = customerService;
+            this._logger = logger;
+            this._orderTotalCalculationService = orderTotalCalculationService;
+            this._localizationService = localizationService;
         }
 
         #endregion
-
-        #region Utilities
-
-        /// <summary>
-        /// Gets Worldpay URL
-        /// </summary>
-        /// <returns></returns>
-        private string GetWorldpayUrl()
-        {
-            return _worldPayPaymentSettings.UseSandbox ?
-                "https://secure-test.worldpay.com/wcc/purchase" :
-                "https://secure.worldpay.com/wcc/purchase";
-        }
-
-        #endregion
-
+        
         #region Methods
 
         /// <summary>
@@ -77,8 +65,92 @@ namespace Nop.Plugin.Payments.WorldPay
         /// <returns>Process payment result</returns>
         public ProcessPaymentResult ProcessPayment(ProcessPaymentRequest processPaymentRequest)
         {
+            //get USD currency
+            var usdCurrency = _currencyService.GetCurrencyByCode("USD");
+            if (usdCurrency == null)
+                throw new NopException("USD currency could not be loaded");
+
+            //get order amount in USD currency
+            var amount = _currencyService.ConvertFromPrimaryStoreCurrency(processPaymentRequest.OrderTotal, usdCurrency);
+
+            var customer = _customerService.GetCustomerById(processPaymentRequest.CustomerId);
+
+            var names = processPaymentRequest.CreditCardName.Split(' ');
+            var firstName = names[0];
+            var lastName = names.Length > 1 ? names[1] : string.Empty;
+
+            var card = new Card
+            {
+                Number = processPaymentRequest.CreditCardNumber,
+                Cvv = processPaymentRequest.CreditCardCvv2,
+                ExpirationDate =
+                    processPaymentRequest.CreditCardExpireMonth.ToString("D2") + "/" +
+                    processPaymentRequest.CreditCardExpireYear,
+                Address = new Address
+                {
+                    Line1 = customer.BillingAddress.Address1,
+                    City = customer.BillingAddress.City,
+                    Zip = customer.BillingAddress.ZipPostalCode
+                },
+                FirstName = firstName
+            };
+
+            if (!string.IsNullOrEmpty(lastName))
+                card.LastName = lastName;
+
+            PaymentRequest request;
+
+            if (_worldPayPaymentSettings.TransactMode == TransactMode.Authorize)
+            {
+                request = new AuthorizeRequest
+                {
+                    Amount = amount,
+                    Card = card
+                };
+            }
+            else
+            {
+                request = new ChargeRequest
+                {
+                    Amount = amount,
+                    Card = card
+                };
+            }
+
             var result = new ProcessPaymentResult();
-            result.NewPaymentStatus = PaymentStatus.Pending;
+
+            var response = WorldPayHelper.PostRequest(_worldPayPaymentSettings, request, _logger);
+
+            if (response == null)
+            {
+                const string error = "worldPay unknown error";
+                _logger.Error(error);
+                result.AddError(error);
+                return result;
+            }
+
+            if (response.Success)
+            {
+                if (_worldPayPaymentSettings.TransactMode == TransactMode.Authorize)
+                {
+                    result.AuthorizationTransactionId = response.Transaction.TransactionId.ToString(); 
+                }
+                if (_worldPayPaymentSettings.TransactMode == TransactMode.AuthorizeAndCapture)
+                {
+                    result.CaptureTransactionId = string.Format("{0},{1}", response.Transaction.TransactionId, response.Transaction.AuthorizationCode);
+                }
+
+                result.AuthorizationTransactionResult = response.Result;
+                result.AvsResult = response.Transaction.AvsResult;
+                result.NewPaymentStatus = _worldPayPaymentSettings.TransactMode == TransactMode.Authorize ? PaymentStatus.Authorized : PaymentStatus.Paid;
+            }
+            else
+            {
+                var error = string.Format("worldPay error: {0} ({1})", response.Result, response.Message);
+               _logger.Error(error);
+                result.AddError(error);
+            }
+
             return result;
         }
 
@@ -88,144 +160,7 @@ namespace Nop.Plugin.Payments.WorldPay
         /// <param name="postProcessPaymentRequest">Payment info required for an order processing</param>
         public void PostProcessPayment(PostProcessPaymentRequest postProcessPaymentRequest)
         {
-            #region Dummy test card numbers
-            //card type
-            //card number
-            //number length
-            //issue no length
-            //Mastercard
-            //5100080000000000
-            //16
-            //0
-            //Visa Delta - UK
-            //4406080400000000
-            //16
-            //0
-            //Visa Delta - Non UK
-            //4462030000000000
-            //16
-            //0
-            //Visa
-            //4911830000000
-            //13
-            //0
-            //Visa
-            //4917610000000000
-            //16
-            //0
-            //American Express
-            //370000200000000
-            //15
-            //0
-            //Diners
-            //36700102000000
-            //14
-            //0
-            //JCB
-            //3528000700000000
-            //16
-            //0
-            //Visa Electron (UK only)
-            //4917300800000000
-            //16
-            //0
-            //Solo
-            //6334580500000000
-            //16
-            //0
-            //Solo
-            //633473060000000000
-            //18
-            //1
-            //Discover Card
-            //6011000400000000
-            //16
-            //0
-            //Laser
-            //630495060000000000
-            //18
-            //0
-            //Maestro (UK only)
-            //6759649826438453
-            //16
-            //0
-            //Visa Purchasing
-            //4484070000000000
-            //16
-            //0
-            #endregion
-
-
-            string returnUrl = _webHelper.GetStoreLocation(false) + "Plugins/PaymentWorldPay/Return";
-
-            var remotePostHelper = new RemotePost();
-            remotePostHelper.FormName = "WorldpayForm";
-            remotePostHelper.Url = GetWorldpayUrl();
-
-            remotePostHelper.Add("instId", _worldPayPaymentSettings.InstanceId);
-            remotePostHelper.Add("cartId", postProcessPaymentRequest.Order.Id.ToString());
-
-            if (!string.IsNullOrEmpty(_worldPayPaymentSettings.CreditCard))
-            {
-                remotePostHelper.Add("paymentType", _worldPayPaymentSettings.CreditCard);
-            }
-
-            if (!string.IsNullOrEmpty(_worldPayPaymentSettings.CssName))
-            {
-                remotePostHelper.Add("MC_WorldPayCSSName", _worldPayPaymentSettings.CssName);
-            }
-
-            remotePostHelper.Add("currency", _currencyService.GetCurrencyById(_currencySettings.PrimaryStoreCurrencyId).CurrencyCode);
-            remotePostHelper.Add("email", postProcessPaymentRequest.Order.BillingAddress.Email);
-            remotePostHelper.Add("hideContact", "true");
-            remotePostHelper.Add("noLanguageMenu", "true");
-            remotePostHelper.Add("withDelivery", postProcessPaymentRequest.Order.ShippingStatus != ShippingStatus.ShippingNotRequired ? "true" : "false");
-            remotePostHelper.Add("fixContact", "false");
-            remotePostHelper.Add("amount", postProcessPaymentRequest.Order.OrderTotal.ToString(new CultureInfo("en-US", false).NumberFormat));
-            remotePostHelper.Add("desc", _storeContext.CurrentStore.Name);
-            remotePostHelper.Add("M_UserID", postProcessPaymentRequest.Order.CustomerId.ToString());
-            remotePostHelper.Add("M_FirstName", postProcessPaymentRequest.Order.BillingAddress.FirstName);
-            remotePostHelper.Add("M_LastName", postProcessPaymentRequest.Order.BillingAddress.LastName);
-            remotePostHelper.Add("M_Addr1", postProcessPaymentRequest.Order.BillingAddress.Address1);
-            remotePostHelper.Add("tel", postProcessPaymentRequest.Order.BillingAddress.PhoneNumber);
-            remotePostHelper.Add("M_Addr2", postProcessPaymentRequest.Order.BillingAddress.Address2);
-            remotePostHelper.Add("M_Business", postProcessPaymentRequest.Order.BillingAddress.Company);
-
-            var cultureInfo = new CultureInfo(_workContext.WorkingLanguage.LanguageCulture);
-            remotePostHelper.Add("lang", cultureInfo.TwoLetterISOLanguageName);
-
-            var billingStateProvince = postProcessPaymentRequest.Order.BillingAddress.StateProvince;
-            if (billingStateProvince != null)
-                remotePostHelper.Add("M_StateCounty", billingStateProvince.Abbreviation);
-            else
-                remotePostHelper.Add("M_StateCounty", "");
-            if (!_worldPayPaymentSettings.UseSandbox)
-                remotePostHelper.Add("testMode", "0");
-            else
-                remotePostHelper.Add("testMode", "100");
-            remotePostHelper.Add("postcode", postProcessPaymentRequest.Order.BillingAddress.ZipPostalCode);
-            var billingCountry = postProcessPaymentRequest.Order.BillingAddress.Country;
-            if (billingCountry != null)
-                remotePostHelper.Add("country", billingCountry.TwoLetterIsoCode);
-            else
-                remotePostHelper.Add("country", "");
-
-            remotePostHelper.Add("address", postProcessPaymentRequest.Order.BillingAddress.Address1 + "," + (billingCountry != null ? billingCountry.Name : ""));
-            remotePostHelper.Add("MC_callback", returnUrl);
-            remotePostHelper.Add("name", postProcessPaymentRequest.Order.BillingAddress.FirstName + " " + postProcessPaymentRequest.Order.BillingAddress.LastName);
-
-            if (postProcessPaymentRequest.Order.ShippingStatus != ShippingStatus.ShippingNotRequired)
-            {
-                remotePostHelper.Add("delvName", postProcessPaymentRequest.Order.ShippingAddress.FirstName + " " + postProcessPaymentRequest.Order.ShippingAddress.LastName);
-                string delvAddress = postProcessPaymentRequest.Order.ShippingAddress.Address1;
-                delvAddress += (!string.IsNullOrEmpty(postProcessPaymentRequest.Order.ShippingAddress.Address2)) ? " " + postProcessPaymentRequest.Order.ShippingAddress.Address2 : string.Empty;
-                remotePostHelper.Add("delvAddress", delvAddress);
-                remotePostHelper.Add("delvPostcode", postProcessPaymentRequest.Order.ShippingAddress.ZipPostalCode);
-                var shippingCountry = postProcessPaymentRequest.Order.ShippingAddress.Country;
-                remotePostHelper.Add("delvCountry", shippingCountry.TwoLetterIsoCode);
-            }
-
-            remotePostHelper.Post();
+            //nothing
         }
 
         /// <summary>
@@ -248,7 +183,9 @@ namespace Nop.Plugin.Payments.WorldPay
         /// <returns>Additional handling fee</returns>
         public decimal GetAdditionalHandlingFee(IList<ShoppingCartItem> cart)
         {
-            return _worldPayPaymentSettings.AdditionalFee;
+            var result = this.CalculateAdditionalFee(_orderTotalCalculationService, cart,
+                _worldPayPaymentSettings.AdditionalFee, _worldPayPaymentSettings.AdditionalFeePercentage);
+            return result;
         }
 
         /// <summary>
@@ -258,8 +195,35 @@ namespace Nop.Plugin.Payments.WorldPay
         /// <returns>Capture payment result</returns>
         public CapturePaymentResult Capture(CapturePaymentRequest capturePaymentRequest)
         {
+            //get USD currency
+            var usdCurrency = _currencyService.GetCurrencyByCode("USD");
+            if (usdCurrency == null)
+                throw new NopException("USD currency could not be loaded");
+
+            //get order amount in USD currency
+            var amount = _currencyService.ConvertFromPrimaryStoreCurrency(capturePaymentRequest.Order.OrderTotal, usdCurrency);
+
             var result = new CapturePaymentResult();
-            result.AddError("Capture method not supported");
+
+            PaymentRequest request = new PriorAuthCaptureRequest
+            {
+                Amount = amount,
+                TransactionId = int.Parse(capturePaymentRequest.Order.AuthorizationTransactionId)
+            };
+
+            var response = WorldPayHelper.PostRequest(_worldPayPaymentSettings, request, _logger);
+
+            //validate
+            if (response == null || !response.Success)
+            {
+                result.Errors.Add(string.Format("worldPay error: {0}", response == null ? "unknown error" : response.Message));
+                return result;
+            }
+
+            result.CaptureTransactionId = string.Format("{0},{1}", response.Transaction.TransactionId, response.Transaction.AuthorizationCode);
+            result.CaptureTransactionResult = response.Result;
+            result.NewPaymentStatus = PaymentStatus.Paid;
+
             return result;
         }
 
@@ -270,8 +234,32 @@ namespace Nop.Plugin.Payments.WorldPay
         /// <returns>Result</returns>
         public RefundPaymentResult Refund(RefundPaymentRequest refundPaymentRequest)
         {
+            //get USD currency
+            var usdCurrency = _currencyService.GetCurrencyByCode("USD");
+            if (usdCurrency == null)
+                throw new NopException("USD currency could not be loaded");
+
+            //get order amount in USD currency
+            var amount = _currencyService.ConvertFromPrimaryStoreCurrency(refundPaymentRequest.AmountToRefund, usdCurrency);
+
             var result = new RefundPaymentResult();
-            result.AddError("Refund method not supported");
+
+            PaymentRequest request = new RefundRequest
+            {
+                Amount = amount,
+                TransactionId = int.Parse(refundPaymentRequest.Order.AuthorizationTransactionId ?? refundPaymentRequest.Order.CaptureTransactionId.Split(',')[0])
+            };
+
+            var response = WorldPayHelper.PostRequest(_worldPayPaymentSettings, request, _logger);
+
+            //validate
+            if (response == null || !response.Success)
+            {
+                result.Errors.Add(string.Format("worldPay error: {0}", response == null ? "unknown error" : response.Message));
+            }
+
+            result.NewPaymentStatus = PaymentStatus.PartiallyRefunded;
+
             return result;
         }
 
@@ -283,7 +271,22 @@ namespace Nop.Plugin.Payments.WorldPay
         public VoidPaymentResult Void(VoidPaymentRequest voidPaymentRequest)
         {
             var result = new VoidPaymentResult();
-            result.AddError("Void method not supported");
+
+            PaymentRequest request = new VoidRequest
+            {
+                TransactionId = int.Parse(voidPaymentRequest.Order.AuthorizationTransactionId ?? voidPaymentRequest.Order.CaptureTransactionId.Split(',')[0])
+            };
+
+            var response = WorldPayHelper.PostRequest(_worldPayPaymentSettings, request, _logger);
+
+            //validate
+            if (response == null || !response.Success)
+            {
+                result.Errors.Add(string.Format("worldPay error: {0}", response == null ? "unknown error" : response.Message));
+            }
+
+            result.NewPaymentStatus = PaymentStatus.Voided;
+
             return result;
         }
 
@@ -345,7 +348,7 @@ namespace Nop.Plugin.Payments.WorldPay
         {
             actionName = "Configure";
             controllerName = "PaymentWorldPay";
-            routeValues = new RouteValueDictionary() { { "Namespaces", "Nop.Plugin.Payments.WorldPay.Controllers" }, { "area", null } };
+            routeValues = new RouteValueDictionary { { "Namespaces", "Nop.Plugin.Payments.WorldPay.Controllers" }, { "area", null } };
         }
 
         /// <summary>
@@ -358,7 +361,7 @@ namespace Nop.Plugin.Payments.WorldPay
         {
             actionName = "PaymentInfo";
             controllerName = "PaymentWorldPay";
-            routeValues = new RouteValueDictionary() { { "Namespaces", "Nop.Plugin.Payments.WorldPay.Controllers" }, { "area", null } };
+            routeValues = new RouteValueDictionary { { "Namespaces", "Nop.Plugin.Payments.WorldPay.Controllers" }, { "area", null } };
         }
 
         public Type GetControllerType()
@@ -368,52 +371,66 @@ namespace Nop.Plugin.Payments.WorldPay
 
         public override void Install()
         {
-            var settings = new WorldPayPaymentSettings()
+            var settings = new WorldPayPaymentSettings
             {
                 UseSandbox = true,
-                InstanceId = "",
-                CreditCard = "",
-                CallbackPassword = "",
-                CssName = "",
                 AdditionalFee = 0,
+                TransactMode = TransactMode.AuthorizeAndCapture,
+                EndPoint = "https://gwapi.demo.securenet.com/api/",
+                DeveloperId = 12345678,
+                DeveloperVersion = "1.0"
             };
             _settingService.SaveSetting(settings);
 
             //locales
-            this.AddOrUpdatePluginLocaleResource("Plugins.Payments.WorldPay.RedirectionTip", "You will be redirected to WorldPay site to complete the order.");
             this.AddOrUpdatePluginLocaleResource("Plugins.Payments.WorldPay.UseSandbox", "Use Sandbox");
             this.AddOrUpdatePluginLocaleResource("Plugins.Payments.WorldPay.UseSandbox.Hint", "Use sandbox?");
-            this.AddOrUpdatePluginLocaleResource("Plugins.Payments.WorldPay.InstanceId", "Instance ID");
-            this.AddOrUpdatePluginLocaleResource("Plugins.Payments.WorldPay.InstanceId.Hint", "Enter instance ID.");
-            this.AddOrUpdatePluginLocaleResource("Plugins.Payments.WorldPay.CreditCard", "Payment Method");
-            this.AddOrUpdatePluginLocaleResource("Plugins.Payments.WorldPay.CreditCard.Hint", "Enter payment method");
-            this.AddOrUpdatePluginLocaleResource("Plugins.Payments.WorldPay.CallbackPassword", "Callback password");
-            this.AddOrUpdatePluginLocaleResource("Plugins.Payments.WorldPay.CallbackPassword.Hint", "Enter callback password.");
-            this.AddOrUpdatePluginLocaleResource("Plugins.Payments.WorldPay.CssName", "CSS");
-            this.AddOrUpdatePluginLocaleResource("Plugins.Payments.WorldPay.CssName.Hint", "Enter CSS.");
+            this.AddOrUpdatePluginLocaleResource("Plugins.Payments.WorldPay.PaymentMethodDescription", "Pay by credit / debit card");
+            this.AddOrUpdatePluginLocaleResource("Plugins.Payments.WorldPay.TransactMode", "Transaction mode");
+            this.AddOrUpdatePluginLocaleResource("Plugins.Payments.WorldPay.TransactMode.Hint", "Choose transaction mode.");
+            this.AddOrUpdatePluginLocaleResource("Plugins.Payments.WorldPay.SecureNetID", "Secure Net ID");
+            this.AddOrUpdatePluginLocaleResource("Plugins.Payments.WorldPay.SecureNetID.Hint", "Specify secure Net ID. You will get this in an email shortly after signing up for your account.");
+            this.AddOrUpdatePluginLocaleResource("Plugins.Payments.WorldPay.SecureKey", "Secure key");
+            this.AddOrUpdatePluginLocaleResource("Plugins.Payments.WorldPay.SecureKey.Hint", "Specify secure key. You can obtain the Secure Key by signing into the Virtual Terminal with the login credentials that you were emailed to you during the sign-up process. You will then need to navigate to Settings and click on the Key Management link.");
+            this.AddOrUpdatePluginLocaleResource("Plugins.Payments.WorldPay.EndPoint", "Endpoint");
+            this.AddOrUpdatePluginLocaleResource("Plugins.Payments.WorldPay.EndPoint.Hint", "Specify processed endpoint.");
+            this.AddOrUpdatePluginLocaleResource("Plugins.Payments.WorldPay.DeveloperId", "Developer ID");
+            this.AddOrUpdatePluginLocaleResource("Plugins.Payments.WorldPay.DeveloperId.Hint", "Specify developer ID");
+            this.AddOrUpdatePluginLocaleResource("Plugins.Payments.WorldPay.DeveloperVersion", "Developer version");
+            this.AddOrUpdatePluginLocaleResource("Plugins.Payments.WorldPay.DeveloperVersion.Hint", "Specify developer version");
             this.AddOrUpdatePluginLocaleResource("Plugins.Payments.WorldPay.AdditionalFee", "Additional fee");
             this.AddOrUpdatePluginLocaleResource("Plugins.Payments.WorldPay.AdditionalFee.Hint", "Enter additional fee to charge your customers.");
-            
+            this.AddOrUpdatePluginLocaleResource("Plugins.Payments.WorldPay.AdditionalFeePercentage", "Additional fee. Use percentage");
+            this.AddOrUpdatePluginLocaleResource("Plugins.Payments.WorldPay.AdditionalFeePercentage.Hint", "Determines whether to apply a percentage additional fee to the order total. If not enabled, a fixed value is used.");
+
             base.Install();
         }
 
         public override void Uninstall()
         {
+            //settings
+            _settingService.DeleteSetting<WorldPayPaymentSettings>();
+
             //locales
-            this.DeletePluginLocaleResource("Plugins.Payments.WorldPay.RedirectionTip");
             this.DeletePluginLocaleResource("Plugins.Payments.WorldPay.UseSandbox");
             this.DeletePluginLocaleResource("Plugins.Payments.WorldPay.UseSandbox.Hint");
-            this.DeletePluginLocaleResource("Plugins.Payments.WorldPay.InstanceId");
-            this.DeletePluginLocaleResource("Plugins.Payments.WorldPay.InstanceId.Hint");
-            this.DeletePluginLocaleResource("Plugins.Payments.WorldPay.CreditCard");
-            this.DeletePluginLocaleResource("Plugins.Payments.WorldPay.CreditCard.Hint");
-            this.DeletePluginLocaleResource("Plugins.Payments.WorldPay.CallbackPassword");
-            this.DeletePluginLocaleResource("Plugins.Payments.WorldPay.CallbackPassword.Hint");
-            this.DeletePluginLocaleResource("Plugins.Payments.WorldPay.CssName");
-            this.DeletePluginLocaleResource("Plugins.Payments.WorldPay.CssName.Hint");
+            this.DeletePluginLocaleResource("Plugins.Payments.WorldPay.PaymentMethodDescription");
+            this.DeletePluginLocaleResource("Plugins.Payments.WorldPay.TransactMode");
+            this.DeletePluginLocaleResource("Plugins.Payments.WorldPay.TransactMode.Hint");
+            this.DeletePluginLocaleResource("Plugins.Payments.WorldPay.SecureNetID");
+            this.DeletePluginLocaleResource("Plugins.Payments.WorldPay.SecureNetID.Hint");
+            this.DeletePluginLocaleResource("Plugins.Payments.WorldPay.SecureKey");
+            this.DeletePluginLocaleResource("Plugins.Payments.WorldPay.SecureKey.Hint");
+            this.DeletePluginLocaleResource("Plugins.Payments.WorldPay.EndPoint");
+            this.DeletePluginLocaleResource("Plugins.Payments.WorldPay.EndPoint.Hint");
+            this.DeletePluginLocaleResource("Plugins.Payments.WorldPay.DeveloperId");
+            this.DeletePluginLocaleResource("Plugins.Payments.WorldPay.DeveloperId.Hint");
+            this.DeletePluginLocaleResource("Plugins.Payments.WorldPay.DeveloperVersion");
+            this.DeletePluginLocaleResource("Plugins.Payments.WorldPay.DeveloperVersion.Hint");
             this.DeletePluginLocaleResource("Plugins.Payments.WorldPay.AdditionalFee");
             this.DeletePluginLocaleResource("Plugins.Payments.WorldPay.AdditionalFee.Hint");
-            
+            this.DeletePluginLocaleResource("Plugins.Payments.WorldPay.AdditionalFeePercentage");
+            this.DeletePluginLocaleResource("Plugins.Payments.WorldPay.AdditionalFeePercentage.Hint");
 
             base.Uninstall();
         }
@@ -429,7 +446,7 @@ namespace Nop.Plugin.Payments.WorldPay
         {
             get
             {
-                return false;
+                return true;
             }
         }
 
@@ -440,7 +457,7 @@ namespace Nop.Plugin.Payments.WorldPay
         {
             get
             {
-                return false;
+                return true;
             }
         }
 
@@ -451,7 +468,7 @@ namespace Nop.Plugin.Payments.WorldPay
         {
             get
             {
-                return false;
+                return true;
             }
         }
 
@@ -462,7 +479,7 @@ namespace Nop.Plugin.Payments.WorldPay
         {
             get
             {
-                return false;
+                return true;
             }
         }
 
@@ -484,7 +501,7 @@ namespace Nop.Plugin.Payments.WorldPay
         {
             get
             {
-                return PaymentMethodType.Redirection;
+                return PaymentMethodType.Standard;
             }
         }
 
@@ -494,6 +511,14 @@ namespace Nop.Plugin.Payments.WorldPay
         public bool SkipPaymentInfo
         {
             get { return false; }
+        }
+
+        /// <summary>
+        /// Gets a payment method description that will be displayed on checkout pages in the public store
+        /// </summary>
+        public string PaymentMethodDescription
+        {
+            get { return _localizationService.GetResource("Plugins.Payments.AuthorizeNet.PaymentMethodDescription"); }
         }
 
         #endregion
